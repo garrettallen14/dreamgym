@@ -21,6 +21,8 @@ dependencies = [
     "nltk",
     "scikit-learn",
     "pyyaml",
+    "fastapi",
+    "uvicorn[standard]",
 ]
 
 [project.optional-dependencies]
