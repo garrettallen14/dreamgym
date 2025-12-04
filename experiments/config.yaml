@@ -1,0 +1,153 @@
+# Experiment configuration for A40 GPU
+# Run with: uv run python experiments/run_sweep.py --config experiments/config.yaml
+
+defaults:
+  base_model: "Qwen/Qwen2.5-3B-Instruct"
+  train_data: "data/experience_train_hf.jsonl"
+  val_data: "data/experience_val_hf.jsonl"
+  output_base: "models/experiments"
+  epochs: 3
+  use_4bit: true
+  bf16: true
+  gradient_checkpointing: true
+  warmup_ratio: 0.1
+  weight_decay: 0.01
+  max_seq_length: 2048
+  logging_steps: 10
+  save_strategy: "epoch"
+  eval_strategy: "epoch"
+
+# Sweep configurations - each creates one experiment run
+sweeps:
+  # Phase 1: Find best LoRA rank
+  lora_rank_sweep:
+    description: "Find optimal LoRA rank"
+    priority: 1
+    variations:
+      - name: "rank_8"
+        lora_rank: 8
+        lora_alpha: 16
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        
+      - name: "rank_16"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        
+      - name: "rank_32"
+        lora_rank: 32
+        lora_alpha: 64
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        
+      - name: "rank_64"
+        lora_rank: 64
+        lora_alpha: 128
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4
+
+  # Phase 2: Find best learning rate (after rank is chosen)
+  lr_sweep:
+    description: "Find optimal learning rate"
+    priority: 2
+    variations:
+      - name: "lr_1e4"
+        lora_rank: 16  # Use best from phase 1
+        lora_alpha: 32
+        learning_rate: 1e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        
+      - name: "lr_2e4"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        
+      - name: "lr_5e4"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 5e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        
+      - name: "lr_1e3"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 1e-3
+        batch_size: 8
+        gradient_accumulation: 4
+
+  # Phase 3: Batch size / effective batch
+  batch_sweep:
+    description: "Find optimal batch size"
+    priority: 3
+    variations:
+      - name: "eff_batch_16"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 4
+        gradient_accumulation: 4  # effective = 16
+        
+      - name: "eff_batch_32"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4  # effective = 32
+        
+      - name: "eff_batch_64"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 16
+        gradient_accumulation: 4  # effective = 64
+
+  # Phase 4: Sequence length
+  seq_len_sweep:
+    description: "Find optimal sequence length"
+    priority: 4
+    variations:
+      - name: "seq_1024"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 16
+        gradient_accumulation: 4
+        max_seq_length: 1024
+        
+      - name: "seq_2048"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 8
+        gradient_accumulation: 4
+        max_seq_length: 2048
+        
+      - name: "seq_4096"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 2e-4
+        batch_size: 4
+        gradient_accumulation: 8
+        max_seq_length: 4096
+
+# Quick validation run (use this first to ensure everything works)
+quick_test:
+  description: "Fast sanity check"
+  lora_rank: 16
+  lora_alpha: 32
+  learning_rate: 2e-4
+  batch_size: 4
+  gradient_accumulation: 2
+  max_seq_length: 1024
+  epochs: 1
+  max_steps: 100  # Stop after 100 steps
