@@ -242,8 +242,6 @@ def main():
         gradient_checkpointing=True,
         report_to="wandb" if args.use_wandb else "none",
         run_name=f"agent-{args.data}-{args.base_model.split('/')[-1]}",
-        max_seq_length=2048,
-        packing=False,
     )
     
     # Create trainer
@@ -254,6 +252,8 @@ def main():
         eval_dataset=dataset.get("validation"),
         processing_class=tokenizer,
         formatting_func=formatting_func,
+        max_seq_length=2048,
+        packing=False,
     )
     
     # Train
