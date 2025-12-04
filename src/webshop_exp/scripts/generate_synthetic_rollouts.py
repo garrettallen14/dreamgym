@@ -108,29 +108,51 @@ Available actions: search[query]"""
         return output
     
     def _generate(self, prompt: str) -> str:
-        """Generate completion from the model."""
-        messages = [{"role": "user", "content": prompt}]
+        """Generate completion from the model (single prompt)."""
+        return self._generate_batch([prompt])[0]
+    
+    def _generate_batch(self, prompts: List[str]) -> List[str]:
+        """Generate completions for a batch of prompts."""
+        # Format all prompts
+        texts = []
+        for prompt in prompts:
+            messages = [{"role": "user", "content": prompt}]
+            text = self.tokenizer.apply_chat_template(
+                messages, tokenize=False, add_generation_prompt=True
+            )
+            texts.append(text)
         
-        text = self.tokenizer.apply_chat_template(
-            messages, tokenize=False, add_generation_prompt=True
-        )
-        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=1024).to(self.model.device)
+        # Tokenize with padding
+        inputs = self.tokenizer(
+            texts, 
+            return_tensors="pt", 
+            truncation=True, 
+            max_length=1024,
+            padding=True,
+        ).to(self.model.device)
         
         with torch.inference_mode():
             with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=512,  # Much shorter - states are ~100 tokens
+                    max_new_tokens=128,
                     do_sample=False,
                     pad_token_id=self.tokenizer.pad_token_id,
                     use_cache=True,
-                    num_beams=1,  # Ensure greedy
+                    num_beams=1,
                 )
         
-        generated = self.tokenizer.decode(
-            outputs[0][inputs["input_ids"].shape[1]:],
-            skip_special_tokens=True,
-        )
+        # Decode each output
+        generated = []
+        for i, output in enumerate(outputs):
+            # Find where input ends
+            input_len = inputs["attention_mask"][i].sum().item()
+            gen_text = self.tokenizer.decode(
+                output[input_len:],
+                skip_special_tokens=True,
+            )
+            generated.append(gen_text)
+        
         return generated
     
     def _parse_output(self, output: str) -> Tuple[str, float, bool]:
@@ -264,59 +286,86 @@ def load_instructions(path: Optional[Path]) -> List[str]:
     ]
 
 
-def generate_single_trajectory(
+def generate_trajectories_batched(
     env: SyntheticEnvironment,
     policy: HeuristicPolicy,
-    max_steps: int,
-) -> Trajectory:
-    """Generate a single trajectory."""
-    instruction = random.choice(env.instructions)
-    state = env.reset(instruction)
+    num_trajectories: int,
+    max_steps: int = 6,
+    batch_size: int = 16,
+) -> List[Trajectory]:
+    """Generate synthetic trajectories with batched inference."""
+    all_trajectories = []
     
-    transitions = []
-    done = False
-    step = 0
+    # Process in batches
+    num_batches = (num_trajectories + batch_size - 1) // batch_size
     
-    while not done and step < max_steps:
-        available_actions = env.get_available_actions(state)
-        action = policy.select_action(instruction, state, available_actions, step)
-        next_state, reward, done, info = env.step(action)
+    for batch_idx in tqdm(range(num_batches), desc="Generating batches"):
+        current_batch_size = min(batch_size, num_trajectories - batch_idx * batch_size)
         
-        transitions.append(Transition(
-            task_instruction=instruction,
-            state=state,
-            action=action,
-            next_state=next_state,
-            reward=reward,
-            done=done,
-        ))
+        # Initialize batch
+        instructions = [random.choice(env.instructions) for _ in range(current_batch_size)]
+        states = [env._generate_initial_state(inst) for inst in instructions]
+        transitions_list = [[] for _ in range(current_batch_size)]
+        done_flags = [False] * current_batch_size
         
-        state = next_state
-        step += 1
+        # Run steps with batched inference
+        for step in range(max_steps):
+            # Find active trajectories
+            active_indices = [i for i in range(current_batch_size) if not done_flags[i]]
+            if not active_indices:
+                break
+            
+            # Select actions for active trajectories
+            actions = []
+            prompts = []
+            for i in active_indices:
+                available = env.get_available_actions(states[i])
+                action = policy.select_action(instructions[i], states[i], available, step)
+                actions.append(action)
+                prompts.append(env._format_prompt(instructions[i], states[i], action))
+            
+            # Batch generate
+            outputs = env._generate_batch(prompts)
+            
+            # Process outputs
+            for j, i in enumerate(active_indices):
+                next_state, reward, done = env._parse_output(outputs[j])
+                
+                transitions_list[i].append(Transition(
+                    task_instruction=instructions[i],
+                    state=states[i],
+                    action=actions[j],
+                    next_state=next_state,
+                    reward=reward,
+                    done=done,
+                ))
+                
+                states[i] = next_state
+                done_flags[i] = done
+        
+        # Create trajectory objects
+        for i in range(current_batch_size):
+            if transitions_list[i]:
+                total_reward = transitions_list[i][-1].reward
+                all_trajectories.append(Trajectory(
+                    instruction=instructions[i],
+                    transitions=transitions_list[i],
+                    total_reward=total_reward,
+                    metadata={"synthetic": True, "num_steps": len(transitions_list[i])},
+                ))
     
-    total_reward = transitions[-1].reward if transitions else 0.0
-    return Trajectory(
-        instruction=instruction,
-        transitions=transitions,
-        total_reward=total_reward,
-        metadata={"synthetic": True, "num_steps": len(transitions)},
-    )
+    return all_trajectories
 
 
 def generate_trajectories(
     env: SyntheticEnvironment,
     policy: HeuristicPolicy,
     num_trajectories: int,
-    max_steps: int = 8,
+    max_steps: int = 6,
+    batch_size: int = 16,
 ) -> List[Trajectory]:
-    """Generate synthetic trajectories."""
-    trajectories = []
-    
-    for _ in tqdm(range(num_trajectories), desc="Generating trajectories"):
-        traj = generate_single_trajectory(env, policy, max_steps)
-        trajectories.append(traj)
-    
-    return trajectories
+    """Generate synthetic trajectories (uses batched inference)."""
+    return generate_trajectories_batched(env, policy, num_trajectories, max_steps, batch_size)
 
 
 def filter_trajectories(
@@ -381,14 +430,20 @@ def main():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=8,  # Reduced from 15 - most tasks complete in 5-8 steps
+        default=6,
         help="Maximum steps per trajectory",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=16,
+        help="Batch size for parallel trajectory generation",
     )
     parser.add_argument(
         "--temperature",
         type=float,
         default=0.7,
-        help="Generation temperature",
+        help="Generation temperature (ignored, using greedy)",
     )
     parser.add_argument(
         "--exploration-prob",
@@ -431,13 +486,14 @@ def main():
     )
     policy = HeuristicPolicy(exploration_prob=args.exploration_prob)
     
-    # Generate trajectories
-    logger.info(f"Generating {args.num_trajectories} synthetic trajectories")
+    # Generate trajectories with batched inference
+    logger.info(f"Generating {args.num_trajectories} synthetic trajectories (batch_size={args.batch_size})")
     trajectories = generate_trajectories(
         env=env,
         policy=policy,
         num_trajectories=args.num_trajectories,
         max_steps=args.max_steps,
+        batch_size=args.batch_size,
     )
     
     # Filter for quality
