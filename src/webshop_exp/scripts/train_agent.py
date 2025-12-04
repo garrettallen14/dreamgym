@@ -224,8 +224,6 @@ def main():
         eval_strategy="epoch" if "validation" in dataset else "no",
         bf16=True,
         gradient_checkpointing=True,
-        max_seq_length=args.max_seq_length,
-        packing=False,
         report_to="wandb" if not args.no_wandb else "none",
         run_name=f"agent-{args.data}-{args.base_model.split('/')[-1]}",
     )

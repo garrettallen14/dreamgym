@@ -114,17 +114,17 @@ Available actions: search[query]"""
         text = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=True
         )
-        inputs = self.tokenizer(text, return_tensors="pt").to(self.model.device)
+        inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=1024).to(self.model.device)
         
-        with torch.no_grad():
-            outputs = self.model.generate(
-                **inputs,
-                max_new_tokens=self.max_new_tokens,
-                do_sample=self.temperature > 0,
-                temperature=self.temperature if self.temperature > 0 else None,
-                top_p=0.9 if self.temperature > 0 else None,
-                pad_token_id=self.tokenizer.pad_token_id,
-            )
+        with torch.inference_mode():
+            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                outputs = self.model.generate(
+                    **inputs,
+                    max_new_tokens=256,  # Reduced from 512
+                    do_sample=False,     # Greedy is 2x faster
+                    pad_token_id=self.tokenizer.pad_token_id,
+                    use_cache=True,
+                )
         
         generated = self.tokenizer.decode(
             outputs[0][inputs["input_ids"].shape[1]:],
@@ -377,7 +377,7 @@ def main():
     parser.add_argument(
         "--max-steps",
         type=int,
-        default=15,
+        default=8,  # Reduced from 15 - most tasks complete in 5-8 steps
         help="Maximum steps per trajectory",
     )
     parser.add_argument(

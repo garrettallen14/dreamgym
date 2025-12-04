@@ -108,7 +108,7 @@ def load_agent(model_path: Path, base_model: Optional[str] = None) -> Agent:
         logger.warning(f"Could not find base model, defaulting to {base_model}")
     
     logger.info(f"Loading base model: {base_model}")
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     
     model = AutoModelForCausalLM.from_pretrained(
         base_model,
