@@ -8,10 +8,20 @@ Research-based optimizations for QLoRA fine-tuning of experience models.
 
 | Optimization | Impact | Status |
 |--------------|--------|--------|
-| Gradient checkpointing OFF | +15-20% speed | ✅ Default off |
+| Gradient checkpointing | Required for bs=8, seq=2048 | ✅ ON in sweeps |
 | Flash Attention 2 | ~2x speed | ✅ Auto-enabled if available |
 | `TOKENIZERS_PARALLELISM=false` | Avoids hangs, <1% impact | ✅ Set in script |
 | `dataloader_num_workers=4` | Better GPU utilization | ✅ Default |
+
+### Memory vs Speed Tradeoff (A40 48GB)
+
+| batch_size | seq_len | checkpointing | Fits? | Speed |
+|------------|---------|---------------|-------|-------|
+| 4 | 1024 | OFF | ✅ | Fastest |
+| 4 | 2048 | OFF | ✅ | Fast |
+| 8 | 2048 | OFF | ❌ OOM | — |
+| 8 | 2048 | **ON** | ✅ | ~20% slower |
+| 16 | 2048 | ON | ❌ OOM | — |
 
 ### Flash Attention 2 Installation
 

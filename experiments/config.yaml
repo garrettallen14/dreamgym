@@ -26,7 +26,8 @@ defaults:
   use_4bit: true               # QLoRA for A40
   seed: 42
   early_stopping_patience: 2   # Stop if eval loss doesn't improve for 2 evals
-  # gradient_checkpointing: false  # Off by default for 48GB (faster)
+  gradient_checkpointing: true # Required for batch_size=8 + seq_len=2048 on A40
+  max_seq_length: 2048         # Explicit default
 
 # =============================================================================
 # SWEEP DEFINITIONS
@@ -152,8 +153,8 @@ sweeps:
         lora_rank: 16
         lora_alpha: 32
         learning_rate: 2.0e-4
-        batch_size: 16
-        gradient_accumulation: 4  # eff = 64
+        batch_size: 8
+        gradient_accumulation: 8  # eff = 64 (bs=16 OOMs even with checkpointing)
 
 # =============================================================================
 # QUICK TEST (run this first!)
@@ -166,9 +167,10 @@ quick_test:
   lora_rank: 16
   lora_alpha: 32
   learning_rate: 2.0e-4
-  batch_size: 4
-  gradient_accumulation: 2
-  max_seq_length: 1024
+  batch_size: 8
+  gradient_accumulation: 4
+  max_seq_length: 2048
+  gradient_checkpointing: true  # Match sweep settings
   epochs: 1
   max_steps: 100
 
