@@ -25,6 +25,7 @@ dependencies = [
     "uvicorn[standard]",
     "huggingface_hub[hf_transfer]",  # Fast model downloads
     "bitsandbytes>=0.43.1",          # QLoRA quantization
+    "vllm>=0.6.0",                   # Fast batched inference
 ]
 
 [project.optional-dependencies]

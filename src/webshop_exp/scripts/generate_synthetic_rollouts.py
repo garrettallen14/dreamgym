@@ -117,13 +117,14 @@ Available actions: search[query]"""
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=1024).to(self.model.device)
         
         with torch.inference_mode():
-            with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            with torch.amp.autocast('cuda', dtype=torch.bfloat16):
                 outputs = self.model.generate(
                     **inputs,
-                    max_new_tokens=256,  # Reduced from 512
-                    do_sample=False,     # Greedy is 2x faster
+                    max_new_tokens=512,  # Much shorter - states are ~100 tokens
+                    do_sample=False,
                     pad_token_id=self.tokenizer.pad_token_id,
                     use_cache=True,
+                    num_beams=1,  # Ensure greedy
                 )
         
         generated = self.tokenizer.decode(
