@@ -421,8 +421,6 @@ def main():
         remove_unused_columns=True,
         # Speedups
         optim="adamw_torch_fused",  # Fused optimizer (~10% faster)
-        packing=True,               # Pack short sequences together (~20% faster)
-        max_seq_length=2048,        # Required for packing
     )
     
     # Early stopping callback if enabled
