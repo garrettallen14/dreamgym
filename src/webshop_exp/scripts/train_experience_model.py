@@ -384,10 +384,13 @@ def main():
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     
-    # Optional torch.compile for speedup
+    # Optional torch.compile for speedup (not compatible with quantized models)
     if args.compile:
-        logger.info("Compiling model with torch.compile (first few steps will be slower)")
-        model = torch.compile(model)
+        if args.use_4bit:
+            logger.warning("torch.compile not compatible with quantized models - skipping")
+        else:
+            logger.info("Compiling model with torch.compile (first few steps will be slower)")
+            model = torch.compile(model)
     
     # Load dataset
     logger.info("Loading training data")
