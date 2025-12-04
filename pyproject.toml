@@ -5,7 +5,7 @@ description = "Experience Model for WebShop agent benchmark - DreamGym framework
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-    "torch>=2.0",
+    "torch==2.5.0",  # Pin for flash-attn compatibility
     "transformers>=4.36",
     "peft>=0.7",
     "trl>=0.7",
@@ -28,9 +28,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-fast = [
-    "flash-attn>=2.5.0",  # 2x faster attention (requires CUDA, pip install flash-attn --no-build-isolation)
-]
+# Flash attention: install via wheel (don't use uv for this):
+#   uv pip install "https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3/flash_attn-2.8.3+cu12torch2.5cxx11abiFALSE-cp312-cp312-linux_x86_64.whl"
+fast = []  # flash-attn must be installed separately via wheel
 dev = [
     "pytest",
     "ipython",
