@@ -118,9 +118,9 @@ def main():
         help="Weights & Biases project name",
     )
     parser.add_argument(
-        "--no-wandb",
+        "--use-wandb",
         action="store_true",
-        help="Disable Weights & Biases logging",
+        help="Enable Weights & Biases logging (disabled by default)",
     )
     
     args = parser.parse_args()
@@ -159,8 +159,8 @@ def main():
     logger.info(f"  Val data: {val_path if val_path and val_path.exists() else 'None'}")
     logger.info(f"  Output: {args.output}")
     
-    # Setup wandb
-    if args.no_wandb:
+    # Setup wandb (disabled by default)
+    if not args.use_wandb:
         os.environ["WANDB_DISABLED"] = "true"
     else:
         os.environ["WANDB_PROJECT"] = args.wandb_project
@@ -215,6 +215,15 @@ def main():
     
     dataset = load_dataset("json", data_files=data_files)
     
+    # Format function to convert messages to text
+    def formatting_func(example):
+        """Convert messages to chat format string."""
+        return tokenizer.apply_chat_template(
+            example["messages"], 
+            tokenize=False, 
+            add_generation_prompt=False
+        )
+    
     # Training arguments
     training_args = SFTConfig(
         output_dir=str(args.output),
@@ -231,8 +240,10 @@ def main():
         eval_strategy="epoch" if "validation" in dataset else "no",
         bf16=True,
         gradient_checkpointing=True,
-        report_to="wandb" if not args.no_wandb else "none",
+        report_to="wandb" if args.use_wandb else "none",
         run_name=f"agent-{args.data}-{args.base_model.split('/')[-1]}",
+        max_seq_length=2048,
+        packing=False,
     )
     
     # Create trainer
@@ -242,6 +253,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation"),
         processing_class=tokenizer,
+        formatting_func=formatting_func,
     )
     
     # Train

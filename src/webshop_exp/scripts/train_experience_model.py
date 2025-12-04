@@ -275,9 +275,9 @@ def main():
         help="Weights & Biases project name",
     )
     parser.add_argument(
-        "--no-wandb",
+        "--use-wandb",
         action="store_true",
-        help="Disable Weights & Biases logging",
+        help="Enable Weights & Biases logging (disabled by default)",
     )
     parser.add_argument(
         "--max-steps",
@@ -328,8 +328,8 @@ def main():
         logger.info("Run prepare-experience-data --hf-format first.")
         return 1
     
-    # Setup wandb
-    if args.no_wandb:
+    # Setup wandb (disabled by default)
+    if not args.use_wandb:
         os.environ["WANDB_DISABLED"] = "true"
     else:
         os.environ["WANDB_PROJECT"] = args.wandb_project
@@ -416,7 +416,7 @@ def main():
         eval_steps=500,
         bf16=True,
         gradient_checkpointing=args.gradient_checkpointing,
-        report_to="wandb" if not args.no_wandb else "none",
+        report_to="wandb" if args.use_wandb else "none",
         run_name=f"experience-model-{args.base_model.split('/')[-1]}",
         seed=args.seed,
         dataloader_num_workers=4,
