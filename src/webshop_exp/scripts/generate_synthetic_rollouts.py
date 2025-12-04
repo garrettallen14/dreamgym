@@ -263,54 +263,57 @@ def load_instructions(path: Optional[Path]) -> List[str]:
     ]
 
 
+def generate_single_trajectory(
+    env: SyntheticEnvironment,
+    policy: HeuristicPolicy,
+    max_steps: int,
+) -> Trajectory:
+    """Generate a single trajectory."""
+    instruction = random.choice(env.instructions)
+    state = env.reset(instruction)
+    
+    transitions = []
+    done = False
+    step = 0
+    
+    while not done and step < max_steps:
+        available_actions = env.get_available_actions(state)
+        action = policy.select_action(instruction, state, available_actions, step)
+        next_state, reward, done, info = env.step(action)
+        
+        transitions.append(Transition(
+            task_instruction=instruction,
+            state=state,
+            action=action,
+            next_state=next_state,
+            reward=reward,
+            done=done,
+        ))
+        
+        state = next_state
+        step += 1
+    
+    total_reward = transitions[-1].reward if transitions else 0.0
+    return Trajectory(
+        instruction=instruction,
+        transitions=transitions,
+        total_reward=total_reward,
+        metadata={"synthetic": True, "num_steps": len(transitions)},
+    )
+
+
 def generate_trajectories(
     env: SyntheticEnvironment,
     policy: HeuristicPolicy,
     num_trajectories: int,
-    max_steps: int = 15,
+    max_steps: int = 8,
 ) -> List[Trajectory]:
     """Generate synthetic trajectories."""
     trajectories = []
     
     for _ in tqdm(range(num_trajectories), desc="Generating trajectories"):
-        instruction = random.choice(env.instructions)
-        state = env.reset(instruction)
-        
-        transitions = []
-        done = False
-        step = 0
-        
-        while not done and step < max_steps:
-            # Get available actions
-            available_actions = env.get_available_actions(state)
-            
-            # Select action
-            action = policy.select_action(instruction, state, available_actions, step)
-            
-            # Take step
-            next_state, reward, done, info = env.step(action)
-            
-            # Record transition
-            transitions.append(Transition(
-                task_instruction=instruction,
-                state=state,
-                action=action,
-                next_state=next_state,
-                reward=reward,
-                done=done,
-            ))
-            
-            state = next_state
-            step += 1
-        
-        # Create trajectory
-        total_reward = transitions[-1].reward if transitions else 0.0
-        trajectories.append(Trajectory(
-            instruction=instruction,
-            transitions=transitions,
-            total_reward=total_reward,
-            metadata={"synthetic": True, "num_steps": len(transitions)},
-        ))
+        traj = generate_single_trajectory(env, policy, max_steps)
+        trajectories.append(traj)
     
     return trajectories
 
