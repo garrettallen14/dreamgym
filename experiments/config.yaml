@@ -25,6 +25,8 @@ defaults:
   epochs: 2                    # 2 epochs is usually enough to see trends
   use_4bit: true               # QLoRA for A40
   seed: 42
+  early_stopping_patience: 2   # Stop if eval loss doesn't improve for 2 evals
+  # gradient_checkpointing: false  # Off by default for 48GB (faster)
 
 # =============================================================================
 # SWEEP DEFINITIONS

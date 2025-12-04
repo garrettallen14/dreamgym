@@ -103,6 +103,14 @@ def build_command(defaults: dict, variation: dict, output_dir: Path) -> list[str
     if config.get("use_4bit", False):
         cmd.append("--use-4bit")
     
+    # Gradient checkpointing (off by default for A40 48GB)
+    if config.get("gradient_checkpointing", False):
+        cmd.append("--gradient-checkpointing")
+    
+    # Early stopping
+    if config.get("early_stopping_patience") and int(config["early_stopping_patience"]) > 0:
+        cmd.extend(["--early-stopping-patience", str(config["early_stopping_patience"])])
+    
     # Always disable wandb for sweeps (use our own tracking)
     cmd.append("--no-wandb")
     

@@ -2,12 +2,21 @@
 
 Usage:
     uv run train-experience-model --base-model Qwen/Qwen2.5-3B-Instruct --output models/experience_model
+
+Optimized based on research insights:
+- Gradient checkpointing OFF by default (A40 48GB has headroom)
+- Flash Attention 2 enabled when available
+- Early stopping on eval loss
+- Tokenizer parallelism disabled to avoid fork warnings
 """
 
 import argparse
 import logging
 import os
 from pathlib import Path
+
+# Suppress tokenizer parallelism warning (minimal throughput impact per benchmarks)
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
 from datasets import load_dataset
@@ -152,6 +161,17 @@ def main():
         default=42,
         help="Random seed",
     )
+    parser.add_argument(
+        "--gradient-checkpointing",
+        action="store_true",
+        help="Enable gradient checkpointing (saves memory, ~20%% slower). Off by default for A40.",
+    )
+    parser.add_argument(
+        "--early-stopping-patience",
+        type=int,
+        default=0,
+        help="Early stopping patience (0 = disabled). Stop if eval loss doesn't improve for N evals.",
+    )
     
     args = parser.parse_args()
     
@@ -182,6 +202,14 @@ def main():
         "torch_dtype": torch.bfloat16,
         "device_map": "auto",
     }
+    
+    # Enable Flash Attention 2 if available (2x speedup)
+    try:
+        import flash_attn  # noqa: F401
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+        logger.info("Using Flash Attention 2 for faster training")
+    except ImportError:
+        logger.info("Flash Attention 2 not available, using default attention")
     
     if args.use_4bit:
         logger.info("Using 4-bit quantization (QLoRA)")
@@ -231,13 +259,23 @@ def main():
         eval_strategy="epoch" if "validation" in dataset and args.max_steps < 0 else "steps" if "validation" in dataset else "no",
         eval_steps=500,
         bf16=True,
-        gradient_checkpointing=True,
+        gradient_checkpointing=args.gradient_checkpointing,  # Off by default for 48GB GPUs
         report_to="wandb" if not args.no_wandb else "none",
         run_name=f"experience-model-{args.base_model.split('/')[-1]}",
         seed=args.seed,
         dataloader_num_workers=4,
         remove_unused_columns=True,
     )
+    
+    # Early stopping callback if enabled
+    callbacks = []
+    if args.early_stopping_patience > 0 and "validation" in dataset:
+        from transformers import EarlyStoppingCallback
+        callbacks.append(EarlyStoppingCallback(early_stopping_patience=args.early_stopping_patience))
+        training_args.load_best_model_at_end = True
+        training_args.metric_for_best_model = "eval_loss"
+        training_args.greater_is_better = False
+        logger.info(f"Early stopping enabled with patience={args.early_stopping_patience}")
     
     # Create trainer (TRL 0.25+ API uses `processing_class` instead of `tokenizer`)
     trainer = SFTTrainer(
@@ -246,6 +284,7 @@ def main():
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation"),
         processing_class=tokenizer,
+        callbacks=callbacks if callbacks else None,
     )
     
     # Train

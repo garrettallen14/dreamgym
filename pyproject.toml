@@ -23,11 +23,13 @@ dependencies = [
     "pyyaml",
     "fastapi",
     "uvicorn[standard]",
+    "huggingface_hub[hf_transfer]",  # Fast model downloads
+    "bitsandbytes>=0.43.1",          # QLoRA quantization
 ]
 
 [project.optional-dependencies]
-quantization = [
-    "bitsandbytes; sys_platform == 'linux'",
+fast = [
+    "flash-attn>=2.5.0",  # 2x faster attention (requires CUDA, pip install flash-attn --no-build-isolation)
 ]
 dev = [
     "pytest",
