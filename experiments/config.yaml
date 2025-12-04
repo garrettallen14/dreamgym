@@ -1,153 +1,186 @@
-# Experiment configuration for A40 GPU
-# Run with: uv run python experiments/run_sweep.py --config experiments/config.yaml
+# =============================================================================
+# DreamGym Experiment Configuration for A40 GPU (48GB)
+# =============================================================================
+#
+# Run with:
+#   uv run python experiments/run_sweep.py --quick-test     # Sanity check first
+#   uv run python experiments/run_sweep.py --sweep lora_rank_sweep
+#   uv run python experiments/run_sweep.py --all            # Run all in order
+#
+# All results saved to: models/experiments/<name>_<timestamp>/
+#   - experiment_config.json   (full config)
+#   - experiment_results.json  (status, duration, exit code)
+#   - training.log             (full stdout/stderr)
+#   - trainer_state.json       (HF trainer metrics)
+#   - checkpoint-*/            (model checkpoints)
+#
+# Master results: experiments/results/sweep_results.json
+# =============================================================================
 
 defaults:
   base_model: "Qwen/Qwen2.5-3B-Instruct"
   train_data: "data/experience_train_hf.jsonl"
   val_data: "data/experience_val_hf.jsonl"
   output_base: "models/experiments"
-  epochs: 3
-  use_4bit: true
-  bf16: true
-  gradient_checkpointing: true
-  warmup_ratio: 0.1
-  weight_decay: 0.01
-  max_seq_length: 2048
-  logging_steps: 10
-  save_strategy: "epoch"
-  eval_strategy: "epoch"
+  epochs: 2                    # 2 epochs is usually enough to see trends
+  use_4bit: true               # QLoRA for A40
+  seed: 42
 
-# Sweep configurations - each creates one experiment run
+# =============================================================================
+# SWEEP DEFINITIONS
+# =============================================================================
+# Total runs: 10 (lean but informative)
+#
+# Priority order:
+#   1. lora_rank_sweep (3 runs) - highest leverage
+#   2. lr_sweep (4 runs) - second highest
+#   3. batch_sweep (3 runs) - stability/speed tradeoff
+#
+# Dropped: seq_len_sweep - WebShop states are <1500 tokens, 2048 is enough
+# =============================================================================
+
 sweeps:
-  # Phase 1: Find best LoRA rank
+  # ---------------------------------------------------------------------------
+  # Phase 1: LoRA Rank (3 runs, ~6-8 hrs total)
+  # ---------------------------------------------------------------------------
+  # Why these values:
+  #   - rank_8:  Cheap baseline. Often surprisingly good.
+  #   - rank_16: Sweet spot for most tasks. Default choice.
+  #   - rank_32: If 16 underfits. Diminishing returns beyond this.
+  #   - Skipping 64: rarely needed, 2x params of 32 for marginal gain.
+  # ---------------------------------------------------------------------------
   lora_rank_sweep:
-    description: "Find optimal LoRA rank"
+    description: "Find optimal LoRA rank (run first)"
     priority: 1
     variations:
       - name: "rank_8"
         lora_rank: 8
-        lora_alpha: 16
-        learning_rate: 2e-4
+        lora_alpha: 16          # alpha = 2 * rank is standard
+        learning_rate: 2.0e-4
         batch_size: 8
-        gradient_accumulation: 4
-        
+        gradient_accumulation: 4  # eff_batch = 32
+
       - name: "rank_16"
         lora_rank: 16
         lora_alpha: 32
-        learning_rate: 2e-4
+        learning_rate: 2.0e-4
         batch_size: 8
         gradient_accumulation: 4
-        
+
       - name: "rank_32"
         lora_rank: 32
         lora_alpha: 64
-        learning_rate: 2e-4
-        batch_size: 8
-        gradient_accumulation: 4
-        
-      - name: "rank_64"
-        lora_rank: 64
-        lora_alpha: 128
-        learning_rate: 2e-4
+        learning_rate: 2.0e-4
         batch_size: 8
         gradient_accumulation: 4
 
-  # Phase 2: Find best learning rate (after rank is chosen)
+  # ---------------------------------------------------------------------------
+  # Phase 2: Learning Rate (4 runs, ~8-10 hrs total)
+  # ---------------------------------------------------------------------------
+  # Why these values:
+  #   - 1e-4: Conservative, stable but slow
+  #   - 2e-4: Standard LoRA default, usually works
+  #   - 3e-4: Slightly aggressive, often optimal
+  #   - 5e-4: Aggressive, may destabilize but worth testing
+  #   - Skipping 1e-3: almost always diverges with LoRA
+  #
+  # NOTE: Update lora_rank below after Phase 1 results!
+  # ---------------------------------------------------------------------------
   lr_sweep:
-    description: "Find optimal learning rate"
+    description: "Find optimal learning rate (after choosing rank)"
     priority: 2
     variations:
       - name: "lr_1e4"
-        lora_rank: 16  # Use best from phase 1
+        lora_rank: 16           # <- UPDATE after Phase 1
         lora_alpha: 32
-        learning_rate: 1e-4
+        learning_rate: 1.0e-4
         batch_size: 8
         gradient_accumulation: 4
-        
+
       - name: "lr_2e4"
         lora_rank: 16
         lora_alpha: 32
-        learning_rate: 2e-4
+        learning_rate: 2.0e-4
         batch_size: 8
         gradient_accumulation: 4
-        
+
+      - name: "lr_3e4"
+        lora_rank: 16
+        lora_alpha: 32
+        learning_rate: 3.0e-4
+        batch_size: 8
+        gradient_accumulation: 4
+
       - name: "lr_5e4"
         lora_rank: 16
         lora_alpha: 32
-        learning_rate: 5e-4
-        batch_size: 8
-        gradient_accumulation: 4
-        
-      - name: "lr_1e3"
-        lora_rank: 16
-        lora_alpha: 32
-        learning_rate: 1e-3
+        learning_rate: 5.0e-4
         batch_size: 8
         gradient_accumulation: 4
 
-  # Phase 3: Batch size / effective batch
+  # ---------------------------------------------------------------------------
+  # Phase 3: Effective Batch Size (3 runs, ~6-8 hrs total)
+  # ---------------------------------------------------------------------------
+  # Why these values:
+  #   - eff_32:  Baseline (batch=8, accum=4)
+  #   - eff_48:  Middle ground
+  #   - eff_64:  Larger = more stable gradients, but slower per-step
+  #
+  # NOTE: Update lora_rank and lr below after Phase 1+2!
+  # ---------------------------------------------------------------------------
   batch_sweep:
-    description: "Find optimal batch size"
+    description: "Find optimal effective batch size"
     priority: 3
     variations:
-      - name: "eff_batch_16"
-        lora_rank: 16
+      - name: "eff_32"
+        lora_rank: 16           # <- UPDATE after Phase 1
         lora_alpha: 32
-        learning_rate: 2e-4
-        batch_size: 4
-        gradient_accumulation: 4  # effective = 16
-        
-      - name: "eff_batch_32"
-        lora_rank: 16
-        lora_alpha: 32
-        learning_rate: 2e-4
+        learning_rate: 2.0e-4   # <- UPDATE after Phase 2
         batch_size: 8
-        gradient_accumulation: 4  # effective = 32
-        
-      - name: "eff_batch_64"
-        lora_rank: 16
-        lora_alpha: 32
-        learning_rate: 2e-4
-        batch_size: 16
-        gradient_accumulation: 4  # effective = 64
+        gradient_accumulation: 4  # eff = 32
 
-  # Phase 4: Sequence length
-  seq_len_sweep:
-    description: "Find optimal sequence length"
-    priority: 4
-    variations:
-      - name: "seq_1024"
+      - name: "eff_48"
         lora_rank: 16
         lora_alpha: 32
-        learning_rate: 2e-4
-        batch_size: 16
-        gradient_accumulation: 4
-        max_seq_length: 1024
-        
-      - name: "seq_2048"
-        lora_rank: 16
-        lora_alpha: 32
-        learning_rate: 2e-4
+        learning_rate: 2.0e-4
         batch_size: 8
-        gradient_accumulation: 4
-        max_seq_length: 2048
-        
-      - name: "seq_4096"
+        gradient_accumulation: 6  # eff = 48
+
+      - name: "eff_64"
         lora_rank: 16
         lora_alpha: 32
-        learning_rate: 2e-4
-        batch_size: 4
-        gradient_accumulation: 8
-        max_seq_length: 4096
+        learning_rate: 2.0e-4
+        batch_size: 16
+        gradient_accumulation: 4  # eff = 64
 
-# Quick validation run (use this first to ensure everything works)
+# =============================================================================
+# QUICK TEST (run this first!)
+# =============================================================================
+# Validates the full pipeline works before burning GPU hours.
+# Should complete in ~5-10 minutes.
+# =============================================================================
 quick_test:
-  description: "Fast sanity check"
+  description: "Fast sanity check (run first!)"
   lora_rank: 16
   lora_alpha: 32
-  learning_rate: 2e-4
+  learning_rate: 2.0e-4
   batch_size: 4
   gradient_accumulation: 2
   max_seq_length: 1024
   epochs: 1
-  max_steps: 100  # Stop after 100 steps
+  max_steps: 100
+
+# =============================================================================
+# FINAL TRAINING (after sweeps)
+# =============================================================================
+# Use best hyperparams from sweeps for full training.
+# Uncomment and update values after sweep analysis.
+# =============================================================================
+# final:
+#   description: "Full training with best hyperparams"
+#   lora_rank: 16              # <- from sweep
+#   lora_alpha: 32
+#   learning_rate: 2.0e-4      # <- from sweep
+#   batch_size: 8              # <- from sweep
+#   gradient_accumulation: 4
+#   epochs: 3                  # Full 3 epochs for final model
