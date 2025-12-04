@@ -19,6 +19,10 @@ from pathlib import Path
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
+
+# Enable TF32 for faster matmuls on Ampere+ GPUs (A40, A100, etc.)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
 from datasets import load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
 import json
@@ -127,14 +131,11 @@ class SampleGenerationCallback(TrainerCallback):
                 # Generate with inference mode and proper dtype handling
                 try:
                     with torch.inference_mode():
-                        # Use bfloat16 autocast for flash attention compatibility
                         with torch.cuda.amp.autocast(dtype=torch.bfloat16):
                             outputs = model.generate(
                                 **inputs,
                                 max_new_tokens=256,
-                                do_sample=True,
-                                temperature=0.7,
-                                top_p=0.9,
+                                do_sample=False,  # Greedy for speed
                                 pad_token_id=self.tokenizer.pad_token_id,
                                 use_cache=True,
                             )
@@ -313,6 +314,11 @@ def main():
         default=3,
         help="Number of samples to generate at each checkpoint.",
     )
+    parser.add_argument(
+        "--compile",
+        action="store_true",
+        help="Use torch.compile for ~20%% speedup (first few steps slower due to compilation)",
+    )
     
     args = parser.parse_args()
     
@@ -378,6 +384,11 @@ def main():
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
     
+    # Optional torch.compile for speedup
+    if args.compile:
+        logger.info("Compiling model with torch.compile (first few steps will be slower)")
+        model = torch.compile(model)
+    
     # Load dataset
     logger.info("Loading training data")
     dataset = load_training_data(args.train_data, args.val_data)
@@ -406,7 +417,12 @@ def main():
         run_name=f"experience-model-{args.base_model.split('/')[-1]}",
         seed=args.seed,
         dataloader_num_workers=4,
+        dataloader_pin_memory=True,
         remove_unused_columns=True,
+        # Speedups
+        optim="adamw_torch_fused",  # Fused optimizer (~10% faster)
+        packing=True,               # Pack short sequences together (~20% faster)
+        max_seq_length=2048,        # Required for packing
     )
     
     # Early stopping callback if enabled
