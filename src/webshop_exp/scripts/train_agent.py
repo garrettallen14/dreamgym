@@ -241,7 +241,7 @@ def main():
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset.get("validation"),
-        tokenizer=tokenizer,
+        processing_class=tokenizer,
     )
     
     # Train
