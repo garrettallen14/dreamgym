@@ -252,8 +252,6 @@ def main():
         eval_dataset=dataset.get("validation"),
         processing_class=tokenizer,
         formatting_func=formatting_func,
-        max_seq_length=2048,
-        packing=False,
     )
     
     # Train
