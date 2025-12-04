@@ -25,7 +25,8 @@ dependencies = [
     "uvicorn[standard]",
     "huggingface_hub[hf_transfer]",  # Fast model downloads
     "bitsandbytes>=0.43.1",          # QLoRA quantization
-    "vllm>=0.6.0",                   # Fast batched inference
+    # NOTE: vLLM requires torch 2.5.1+ which breaks FA2 wheel compatibility
+    # For fast inference, install vLLM separately or use torch 2.5.1
 ]
 
 [project.optional-dependencies]
