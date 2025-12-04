@@ -2,17 +2,18 @@
 """Main runner script that launches dashboard + training together.
 
 Usage:
+    # YOLO - just run with optimal defaults (recommended!)
+    uv run python run.py yolo
+    
     # Start dashboard only
     uv run python run.py dashboard
     
-    # Run training with dashboard
-    uv run python run.py train --base-model Qwen/Qwen2.5-3B-Instruct --epochs 3
+    # Run training with custom args
+    uv run python run.py train --use-4bit --gradient-checkpointing --epochs 3
     
     # Run sweep with dashboard
-    uv run python run.py sweep --sweep lora_rank_sweep
-    
-    # Run any command with dashboard
-    uv run python run.py cmd "uv run train-experience-model --epochs 1"
+    uv run python run.py sweep --quick-test
+    uv run python run.py sweep --all
 """
 
 import argparse
@@ -119,11 +120,48 @@ def cmd_train(args):
         cmd.extend(["--max-steps", str(args.max_steps)])
     if args.use_4bit:
         cmd.append("--use-4bit")
+    if args.gradient_checkpointing:
+        cmd.append("--gradient-checkpointing")
+    if args.early_stopping > 0:
+        cmd.extend(["--early-stopping-patience", str(args.early_stopping)])
+    if args.sample_every > 0:
+        cmd.extend(["--sample-every", str(args.sample_every)])
+        cmd.extend(["--num-samples", str(args.num_samples)])
     if args.no_wandb:
         cmd.append("--no-wandb")
     
     try:
         exit_code = run_with_logging(cmd, "train_experience_model")
+    finally:
+        dashboard_proc.terminate()
+    
+    return exit_code
+
+
+def cmd_yolo(args):
+    """Run training with optimal defaults - just works!"""
+    dashboard_proc = start_dashboard(args.port)
+    
+    cmd = [
+        "uv", "run", "train-experience-model",
+        "--base-model", "Qwen/Qwen2.5-3B-Instruct",
+        "--output", args.output,
+        "--epochs", "3",
+        "--batch-size", "8",
+        "--gradient-accumulation", "4",
+        "--learning-rate", "2e-4",
+        "--lora-rank", "16",
+        "--lora-alpha", "32",
+        "--use-4bit",
+        "--gradient-checkpointing",
+        "--early-stopping-patience", "2",
+        "--sample-every", "100",
+        "--num-samples", "3",
+        "--no-wandb",
+    ]
+    
+    try:
+        exit_code = run_with_logging(cmd, "yolo_train")
     finally:
         dashboard_proc.terminate()
     
@@ -180,7 +218,11 @@ def main():
     # Dashboard only
     dash_parser = subparsers.add_parser("dashboard", help="Run dashboard only")
     
-    # Training
+    # YOLO - just run with optimal defaults
+    yolo_parser = subparsers.add_parser("yolo", help="🚀 Run with optimal defaults (recommended)")
+    yolo_parser.add_argument("--output", default="models/experience_model_final")
+    
+    # Training with full control
     train_parser = subparsers.add_parser("train", help="Run training with dashboard")
     train_parser.add_argument("--base-model", default="Qwen/Qwen2.5-3B-Instruct")
     train_parser.add_argument("--train-data", default="data/experience_train_hf.jsonl")
@@ -194,6 +236,10 @@ def main():
     train_parser.add_argument("--lora-alpha", type=int, default=32)
     train_parser.add_argument("--max-steps", type=int, default=-1)
     train_parser.add_argument("--use-4bit", action="store_true")
+    train_parser.add_argument("--gradient-checkpointing", action="store_true")
+    train_parser.add_argument("--early-stopping", type=int, default=0, help="Early stopping patience")
+    train_parser.add_argument("--sample-every", type=int, default=100, help="Generate samples every N steps")
+    train_parser.add_argument("--num-samples", type=int, default=3)
     train_parser.add_argument("--no-wandb", action="store_true")
     
     # Sweep
@@ -212,6 +258,8 @@ def main():
     
     if args.command == "dashboard":
         return cmd_dashboard(args)
+    elif args.command == "yolo":
+        return cmd_yolo(args)
     elif args.command == "train":
         return cmd_train(args)
     elif args.command == "sweep":
