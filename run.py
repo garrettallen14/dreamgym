@@ -220,7 +220,7 @@ def main():
     
     # YOLO - just run with optimal defaults
     yolo_parser = subparsers.add_parser("yolo", help="🚀 Run with optimal defaults (recommended)")
-    yolo_parser.add_argument("--output", default="models/experience_model_final")
+    yolo_parser.add_argument("--output", default="models/experiments/yolo_final")
     
     # Training with full control
     train_parser = subparsers.add_parser("train", help="Run training with dashboard")

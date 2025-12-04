@@ -215,7 +215,12 @@ async def stream_log(log_name: str):
 @app.get("/api/samples/{experiment_name}")
 async def get_samples(experiment_name: str):
     """Get training samples for an experiment showing model progress."""
+    # Try models/experiments/ first
     samples_file = EXPERIMENTS_DIR / experiment_name / "samples.jsonl"
+    
+    # Also try models/ directly (for yolo runs)
+    if not samples_file.exists():
+        samples_file = PROJECT_ROOT / "models" / experiment_name / "samples.jsonl"
     
     if not samples_file.exists():
         return {"samples": [], "message": "No samples yet (training may still be starting)"}
@@ -250,18 +255,34 @@ async def list_all_samples():
     """List all experiments with samples available."""
     experiments_with_samples = []
     
+    # Search in models/experiments/
     if EXPERIMENTS_DIR.exists():
         for exp_dir in EXPERIMENTS_DIR.iterdir():
-            samples_file = exp_dir / "samples.jsonl"
-            if samples_file.exists():
-                # Count samples
-                with open(samples_file) as f:
-                    count = sum(1 for line in f if line.strip())
-                experiments_with_samples.append({
-                    "name": exp_dir.name,
-                    "samples_count": count,
-                    "modified": datetime.fromtimestamp(samples_file.stat().st_mtime).isoformat(),
-                })
+            if exp_dir.is_dir():
+                samples_file = exp_dir / "samples.jsonl"
+                if samples_file.exists():
+                    with open(samples_file) as f:
+                        count = sum(1 for line in f if line.strip())
+                    experiments_with_samples.append({
+                        "name": exp_dir.name,
+                        "samples_count": count,
+                        "modified": datetime.fromtimestamp(samples_file.stat().st_mtime).isoformat(),
+                    })
+    
+    # Also search directly in models/ (for yolo runs)
+    models_dir = PROJECT_ROOT / "models"
+    if models_dir.exists():
+        for model_dir in models_dir.iterdir():
+            if model_dir.is_dir() and model_dir.name != "experiments":
+                samples_file = model_dir / "samples.jsonl"
+                if samples_file.exists():
+                    with open(samples_file) as f:
+                        count = sum(1 for line in f if line.strip())
+                    experiments_with_samples.append({
+                        "name": model_dir.name,
+                        "samples_count": count,
+                        "modified": datetime.fromtimestamp(samples_file.stat().st_mtime).isoformat(),
+                    })
     
     return {"experiments": experiments_with_samples}
 

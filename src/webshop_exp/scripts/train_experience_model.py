@@ -124,16 +124,20 @@ class SampleGenerationCallback(TrainerCallback):
                 inputs = self.tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024)
                 inputs = {k: v.to(model.device) for k, v in inputs.items()}
                 
-                # Generate
+                # Generate with inference mode and proper dtype handling
                 try:
-                    outputs = model.generate(
-                        **inputs,
-                        max_new_tokens=512,
-                        do_sample=True,
-                        temperature=0.7,
-                        top_p=0.9,
-                        pad_token_id=self.tokenizer.pad_token_id,
-                    )
+                    with torch.inference_mode():
+                        # Use bfloat16 autocast for flash attention compatibility
+                        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                            outputs = model.generate(
+                                **inputs,
+                                max_new_tokens=256,
+                                do_sample=True,
+                                temperature=0.7,
+                                top_p=0.9,
+                                pad_token_id=self.tokenizer.pad_token_id,
+                                use_cache=True,
+                            )
                     generated = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
                 except Exception as e:
                     generated = f"[Generation error: {e}]"
@@ -391,12 +395,13 @@ def main():
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         logging_steps=10,
-        save_strategy="epoch" if args.max_steps < 0 else "steps",
-        save_steps=500,
+        save_strategy="steps",  # Save periodically
+        save_steps=200,         # Save every 200 steps (~40min)
+        save_total_limit=2,     # Keep only 2 checkpoints to save disk space
         eval_strategy="epoch" if "validation" in dataset and args.max_steps < 0 else "steps" if "validation" in dataset else "no",
         eval_steps=500,
         bf16=True,
-        gradient_checkpointing=args.gradient_checkpointing,  # Off by default for 48GB GPUs
+        gradient_checkpointing=args.gradient_checkpointing,
         report_to="wandb" if not args.no_wandb else "none",
         run_name=f"experience-model-{args.base_model.split('/')[-1]}",
         seed=args.seed,
