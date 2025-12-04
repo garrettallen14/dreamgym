@@ -212,6 +212,60 @@ async def stream_log(log_name: str):
     return StreamingResponse(generate(), media_type="text/event-stream")
 
 
+@app.get("/api/samples/{experiment_name}")
+async def get_samples(experiment_name: str):
+    """Get training samples for an experiment showing model progress."""
+    samples_file = EXPERIMENTS_DIR / experiment_name / "samples.jsonl"
+    
+    if not samples_file.exists():
+        return {"samples": [], "message": "No samples yet (training may still be starting)"}
+    
+    samples = []
+    try:
+        with open(samples_file) as f:
+            for line in f:
+                if line.strip():
+                    samples.append(json.loads(line))
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+    
+    # Group by step for easier viewing
+    by_step = {}
+    for s in samples:
+        step = s.get("step", 0)
+        if step not in by_step:
+            by_step[step] = []
+        by_step[step].append(s)
+    
+    return {
+        "samples": samples,
+        "by_step": by_step,
+        "total": len(samples),
+        "steps_with_samples": sorted(by_step.keys()),
+    }
+
+
+@app.get("/api/samples")
+async def list_all_samples():
+    """List all experiments with samples available."""
+    experiments_with_samples = []
+    
+    if EXPERIMENTS_DIR.exists():
+        for exp_dir in EXPERIMENTS_DIR.iterdir():
+            samples_file = exp_dir / "samples.jsonl"
+            if samples_file.exists():
+                # Count samples
+                with open(samples_file) as f:
+                    count = sum(1 for line in f if line.strip())
+                experiments_with_samples.append({
+                    "name": exp_dir.name,
+                    "samples_count": count,
+                    "modified": datetime.fromtimestamp(samples_file.stat().st_mtime).isoformat(),
+                })
+    
+    return {"experiments": experiments_with_samples}
+
+
 @app.get("/api/outputs")
 async def list_outputs():
     """List generated outputs (samples, predictions, etc.)."""
@@ -437,6 +491,7 @@ DASHBOARD_HTML = """
         <nav class="nav">
             <button class="nav-btn active" onclick="showSection('overview')">Overview</button>
             <button class="nav-btn" onclick="showSection('experiments')">Experiments</button>
+            <button class="nav-btn" onclick="showSection('samples')">📊 Samples</button>
             <button class="nav-btn" onclick="showSection('logs')">Logs</button>
             <button class="nav-btn" onclick="showSection('data')">Data</button>
             <button class="nav-btn" onclick="showSection('outputs')">Outputs</button>
@@ -496,6 +551,17 @@ DASHBOARD_HTML = """
                 <div id="outputs-list">Loading...</div>
             </div>
         </div>
+        
+        <!-- Samples Section -->
+        <div id="samples" class="section">
+            <div class="card">
+                <div class="card-title">Training Samples - Model Progress vs Ground Truth</div>
+                <div class="tabs" id="samples-tabs"></div>
+                <div id="samples-content">
+                    <p style="color: #8b949e;">Select an experiment to view samples...</p>
+                </div>
+            </div>
+        </div>
     </div>
     
     <script>
@@ -509,6 +575,7 @@ DASHBOARD_HTML = """
             
             // Load section data
             if (name === 'experiments') loadExperiments();
+            if (name === 'samples') loadSamplesList();
             if (name === 'logs') loadLogs();
             if (name === 'data') loadData();
             if (name === 'outputs') loadOutputs();
@@ -735,6 +802,74 @@ DASHBOARD_HTML = """
             const div = document.createElement('div');
             div.textContent = text;
             return div.innerHTML;
+        }
+        
+        async function loadSamplesList() {
+            try {
+                const res = await fetch('/api/samples');
+                const data = await res.json();
+                
+                if (!data.experiments || data.experiments.length === 0) {
+                    document.getElementById('samples-tabs').innerHTML = '';
+                    document.getElementById('samples-content').innerHTML = '<p style="color: #8b949e;">No samples found. Start training with --sample-every flag to generate samples.</p>';
+                    return;
+                }
+                
+                document.getElementById('samples-tabs').innerHTML = data.experiments.map((exp, i) => 
+                    `<button class="tab ${i === 0 ? 'active' : ''}" onclick="loadSamples('${exp.name}')">${exp.name.split('_').slice(0,3).join('_')} (${exp.samples_count})</button>`
+                ).join('');
+                
+                // Load first experiment's samples
+                if (data.experiments.length > 0) {
+                    loadSamples(data.experiments[0].name);
+                }
+            } catch (e) {
+                document.getElementById('samples-content').innerHTML = 'Error loading samples list';
+            }
+        }
+        
+        async function loadSamples(experimentName) {
+            // Update active tab
+            document.querySelectorAll('#samples-tabs .tab').forEach(t => t.classList.remove('active'));
+            event?.target?.classList?.add('active');
+            
+            try {
+                const res = await fetch(`/api/samples/${encodeURIComponent(experimentName)}`);
+                const data = await res.json();
+                
+                if (!data.samples || data.samples.length === 0) {
+                    document.getElementById('samples-content').innerHTML = '<p style="color: #8b949e;">No samples yet (training may still be starting)</p>';
+                    return;
+                }
+                
+                // Group by step
+                const steps = data.steps_with_samples || [];
+                
+                let html = '<div style="margin-bottom: 16px;">';
+                html += `<strong>Steps with samples:</strong> ${steps.join(', ')}`;
+                html += '</div>';
+                
+                // Show samples grouped by step
+                for (const step of steps) {
+                    const stepSamples = data.by_step[step] || [];
+                    html += `<div style="margin: 16px 0; padding: 12px; background: #0d1117; border-radius: 6px; border: 1px solid #30363d;">`;
+                    html += `<h3 style="color: #58a6ff; margin: 0 0 12px 0;">Step ${step}</h3>`;
+                    
+                    for (const sample of stepSamples) {
+                        html += `<div style="margin: 8px 0; padding: 8px; background: #161b22; border-radius: 4px;">`;
+                        html += `<div style="color: #8b949e; font-size: 11px; margin-bottom: 4px;">Sample #${sample.sample_idx}</div>`;
+                        html += `<div style="margin: 8px 0;"><strong style="color: #d29922;">Prompt:</strong><pre style="margin: 4px 0; padding: 8px; background: #0d1117; border-radius: 4px; white-space: pre-wrap; font-size: 12px; max-height: 100px; overflow-y: auto;">${escapeHtml(sample.prompt)}</pre></div>`;
+                        html += `<div style="margin: 8px 0;"><strong style="color: #3fb950;">Ground Truth:</strong><pre style="margin: 4px 0; padding: 8px; background: #0d1117; border-radius: 4px; white-space: pre-wrap; font-size: 12px; max-height: 150px; overflow-y: auto;">${escapeHtml(sample.ground_truth)}</pre></div>`;
+                        html += `<div style="margin: 8px 0;"><strong style="color: #58a6ff;">Generated:</strong><pre style="margin: 4px 0; padding: 8px; background: #0d1117; border-radius: 4px; white-space: pre-wrap; font-size: 12px; max-height: 150px; overflow-y: auto;">${escapeHtml(sample.generated)}</pre></div>`;
+                        html += `</div>`;
+                    }
+                    html += `</div>`;
+                }
+                
+                document.getElementById('samples-content').innerHTML = html;
+            } catch (e) {
+                document.getElementById('samples-content').innerHTML = 'Error loading samples: ' + e.message;
+            }
         }
         
         function refreshAll() {

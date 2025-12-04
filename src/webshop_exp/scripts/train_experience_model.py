@@ -21,10 +21,13 @@ os.environ["TOKENIZERS_PARALLELISM"] = "false"
 import torch
 from datasets import load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
+import json
+import random
 from transformers import (
     AutoModelForCausalLM,
     AutoTokenizer,
     BitsAndBytesConfig,
+    TrainerCallback,
     TrainingArguments,
 )
 from trl import SFTConfig, SFTTrainer
@@ -53,6 +56,128 @@ def format_chat_template(example: dict, tokenizer) -> str:
         ]
     
     return tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False)
+
+
+class SampleGenerationCallback(TrainerCallback):
+    """Generate samples at regular intervals to monitor training progress."""
+    
+    def __init__(self, tokenizer, eval_dataset, output_dir: Path, sample_every: int = 100, num_samples: int = 3):
+        self.tokenizer = tokenizer
+        self.eval_dataset = eval_dataset
+        self.output_dir = output_dir
+        self.sample_every = sample_every
+        self.num_samples = num_samples
+        self.samples_file = output_dir / "samples.jsonl"
+        self.sample_indices = None
+        
+    def _get_sample_indices(self):
+        """Get fixed sample indices for consistent comparison."""
+        if self.sample_indices is None:
+            dataset_size = len(self.eval_dataset) if self.eval_dataset else 0
+            if dataset_size > 0:
+                random.seed(42)  # Deterministic samples
+                self.sample_indices = random.sample(range(dataset_size), min(self.num_samples, dataset_size))
+            else:
+                self.sample_indices = []
+        return self.sample_indices
+    
+    def _extract_prompt_from_messages(self, messages: list) -> str:
+        """Extract user prompt from messages."""
+        for msg in messages:
+            if msg.get("role") == "user":
+                return msg.get("content", "")
+        return ""
+    
+    def _extract_ground_truth(self, messages: list) -> str:
+        """Extract assistant response (ground truth) from messages."""
+        for msg in messages:
+            if msg.get("role") == "assistant":
+                return msg.get("content", "")
+        return ""
+    
+    def _generate_samples(self, model, step: int):
+        """Generate samples and save to file."""
+        if not self.eval_dataset or not self._get_sample_indices():
+            return
+        
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        samples = []
+        
+        model.eval()
+        with torch.no_grad():
+            for idx in self._get_sample_indices():
+                example = self.eval_dataset[idx]
+                messages = example.get("messages", [])
+                
+                prompt = self._extract_prompt_from_messages(messages)
+                ground_truth = self._extract_ground_truth(messages)
+                
+                if not prompt:
+                    continue
+                
+                # Format as chat for generation
+                chat_messages = [{"role": "user", "content": prompt}]
+                input_text = self.tokenizer.apply_chat_template(
+                    chat_messages, tokenize=False, add_generation_prompt=True
+                )
+                
+                inputs = self.tokenizer(input_text, return_tensors="pt", truncation=True, max_length=1024)
+                inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                
+                # Generate
+                try:
+                    outputs = model.generate(
+                        **inputs,
+                        max_new_tokens=512,
+                        do_sample=True,
+                        temperature=0.7,
+                        top_p=0.9,
+                        pad_token_id=self.tokenizer.pad_token_id,
+                    )
+                    generated = self.tokenizer.decode(outputs[0][inputs["input_ids"].shape[1]:], skip_special_tokens=True)
+                except Exception as e:
+                    generated = f"[Generation error: {e}]"
+                
+                sample = {
+                    "step": step,
+                    "sample_idx": idx,
+                    "prompt": prompt[:500] + "..." if len(prompt) > 500 else prompt,
+                    "ground_truth": ground_truth,
+                    "generated": generated,
+                }
+                samples.append(sample)
+                
+                # Log to console
+                logger.info(f"\n{'='*60}")
+                logger.info(f"SAMPLE @ Step {step} (idx={idx})")
+                logger.info(f"{'='*60}")
+                logger.info(f"PROMPT: {sample['prompt'][:200]}...")
+                logger.info(f"GROUND TRUTH: {ground_truth[:300]}...")
+                logger.info(f"GENERATED: {generated[:300]}...")
+        
+        # Append to JSONL file
+        with open(self.samples_file, "a") as f:
+            for sample in samples:
+                f.write(json.dumps(sample) + "\n")
+        
+        model.train()
+        logger.info(f"Saved {len(samples)} samples to {self.samples_file}")
+    
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        """Generate samples before any training."""
+        logger.info("Generating initial samples (step 0)...")
+        self._generate_samples(model, step=0)
+    
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        """Generate samples at regular intervals."""
+        if state.global_step > 0 and state.global_step % self.sample_every == 0:
+            logger.info(f"Generating samples at step {state.global_step}...")
+            self._generate_samples(model, step=state.global_step)
+    
+    def on_train_end(self, args, state, control, model=None, **kwargs):
+        """Generate final samples."""
+        logger.info(f"Generating final samples (step {state.global_step})...")
+        self._generate_samples(model, step=state.global_step)
 
 
 def load_training_data(train_path: Path, val_path: Path):
@@ -172,6 +297,18 @@ def main():
         default=0,
         help="Early stopping patience (0 = disabled). Stop if eval loss doesn't improve for N evals.",
     )
+    parser.add_argument(
+        "--sample-every",
+        type=int,
+        default=100,
+        help="Generate samples every N steps (0 = disabled). Shows model progress vs ground truth.",
+    )
+    parser.add_argument(
+        "--num-samples",
+        type=int,
+        default=3,
+        help="Number of samples to generate at each checkpoint.",
+    )
     
     args = parser.parse_args()
     
@@ -276,6 +413,18 @@ def main():
         training_args.metric_for_best_model = "eval_loss"
         training_args.greater_is_better = False
         logger.info(f"Early stopping enabled with patience={args.early_stopping_patience}")
+    
+    # Sample generation callback for monitoring progress
+    if args.sample_every > 0 and "validation" in dataset:
+        sample_callback = SampleGenerationCallback(
+            tokenizer=tokenizer,
+            eval_dataset=dataset["validation"],
+            output_dir=args.output,
+            sample_every=args.sample_every,
+            num_samples=args.num_samples,
+        )
+        callbacks.append(sample_callback)
+        logger.info(f"Sample generation enabled every {args.sample_every} steps ({args.num_samples} samples)")
     
     # Create trainer (TRL 0.25+ API uses `processing_class` instead of `tokenizer`)
     trainer = SFTTrainer(
