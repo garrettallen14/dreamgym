@@ -50,6 +50,7 @@ validate-experience-model = "webshop_exp.scripts.validate_experience_model:main"
 generate-synthetic = "webshop_exp.scripts.generate_synthetic_rollouts:main"
 prepare-agent-data = "webshop_exp.scripts.prepare_agent_data:main"
 train-agent = "webshop_exp.scripts.train_agent:main"
+train-agent-rl = "webshop_exp.scripts.train_agent_rl:main"
 evaluate-agents = "webshop_exp.scripts.evaluate_agents:main"
 
 [build-system]

@@ -168,18 +168,31 @@ Available actions: search[query]"""
         else:
             next_state = output.strip()
         
-        # Extract reward
-        reward_match = re.search(r"Reward:\s*([\d.]+)", output)
-        if reward_match:
-            try:
-                reward = float(reward_match.group(1))
-            except ValueError:
-                pass
+        # Extract reward - try multiple patterns
+        reward_patterns = [
+            r"Reward:\s*([\d.]+)",
+            r"reward[:\s]*([\d.]+)",
+            r"Score:\s*([\d.]+)",
+        ]
+        for pattern in reward_patterns:
+            reward_match = re.search(pattern, output, re.IGNORECASE)
+            if reward_match:
+                try:
+                    reward = float(reward_match.group(1))
+                    break
+                except ValueError:
+                    pass
         
         # Extract done
         done_match = re.search(r"Done:\s*(True|False)", output, re.IGNORECASE)
         if done_match:
             done = done_match.group(1).lower() == "true"
+        
+        # Heuristic: if "purchase complete" or "bought" in output, give reward
+        if any(x in output.lower() for x in ["purchase complete", "bought", "order placed", "thank you for"]):
+            done = True
+            if reward == 0:
+                reward = 1.0  # Default reward for completion
         
         return next_state, reward, done
     

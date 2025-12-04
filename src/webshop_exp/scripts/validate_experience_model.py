@@ -38,6 +38,7 @@ def load_model(model_path: Path, base_model: Optional[str] = None):
     
     logger.info(f"Loading base model: {base_model}")
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
+    tokenizer.padding_side = "left"  # Required for batched generation
     
     model = AutoModelForCausalLM.from_pretrained(
         base_model,

@@ -27,6 +27,13 @@ logger = logging.getLogger(__name__)
 def main():
     parser = argparse.ArgumentParser(description="Train agent with LoRA")
     parser.add_argument(
+        "--method",
+        type=str,
+        choices=["sft", "dpo"],
+        default="sft",
+        help="Training method: 'sft' (behavior cloning) or 'dpo' (preference learning)",
+    )
+    parser.add_argument(
         "--data",
         type=str,
         choices=["real", "synthetic", "custom"],
