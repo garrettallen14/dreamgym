@@ -134,6 +134,64 @@ Training data uses the model's native chat format:
 - **Recommended**: 40GB+ VRAM (A40, A100)
 - Training time: ~2-4 hours for 3B model on A40
 
+---
+
+## Data Quality Analysis
+
+This repo includes rigorous tools for detecting train/val data leakage and overfitting risk.
+
+### Analyze Split Quality
+
+```bash
+# Basic analysis
+python src/analyze_split.py --train data/train.jsonl --val data/val.jsonl
+
+# With semantic similarity (requires sentence-transformers)
+python src/analyze_split.py --train data/train.jsonl --val data/val.jsonl --semantic
+
+# Save detailed report
+python src/analyze_split.py --train data/train.jsonl --val data/val.jsonl --output report.json
+```
+
+### Metrics Computed
+
+| Category | Metrics | Risk Level |
+|----------|---------|------------|
+| **Exact Duplicates** | Full/prompt/completion duplicates | Critical |
+| **Instruction Leakage** | Same tasks in train & val | High |
+| **Entity Leakage** | Same products (ASINs) in both | Medium-High |
+| **N-gram Overlap** | Jaccard, coverage, novelty for n=1,2,3,5 | Medium |
+| **Distribution** | KL divergence, JS divergence, vocab overlap | Diagnostic |
+| **Compression** | Normalized Compression Distance | Diagnostic |
+| **Semantic** | Embedding similarity distribution | Medium |
+
+### Clean Leaky Splits
+
+```bash
+# Remove duplicates only
+python src/clean_split.py --train data/train.jsonl --val data/val.jsonl
+
+# Re-split by instruction (prevents task memorization)
+python src/clean_split.py --train data/train.jsonl --val data/val.jsonl --resplit-by instruction
+
+# Re-split by entity (prevents product memorization)
+python src/clean_split.py --train data/train.jsonl --val data/val.jsonl --resplit-by entity
+```
+
+### Risk Score Interpretation
+
+| Score | Level | Action |
+|-------|-------|--------|
+| 0-5 | MINIMAL | Proceed with training |
+| 5-15 | LOW | Monitor for overfitting |
+| 15-30 | MODERATE | Consider re-splitting |
+| 30-50 | HIGH | Re-split recommended |
+| 50+ | CRITICAL | Re-split required |
+
+See [docs/data_leakage_theory.md](docs/data_leakage_theory.md) for full theoretical background.
+
+---
+
 ## References
 
 1. [DreamGym: Scaling Agent Learning via Experience Synthesis](https://arxiv.org/abs/2511.03773)
