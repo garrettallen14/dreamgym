@@ -1,0 +1,417 @@
+"""Train the Experience Model using LoRA fine-tuning.
+
+This is the core training script that fine-tunes a base LLM to predict
+state transitions: (state, action) → (next_state, reward, done)
+
+Usage:
+    python src/train.py \
+        --train-data data/train.jsonl \
+        --val-data data/val.jsonl \
+        --output models/experience_model \
+        --epochs 3
+
+Key concepts:
+    - LoRA: Low-rank adapters for efficient fine-tuning (~1% of params)
+    - QLoRA: 4-bit quantization + LoRA for lower memory usage
+    - SFTTrainer: Supervised fine-tuning using HuggingFace TRL
+"""
+
+import argparse
+import logging
+import os
+from pathlib import Path
+
+import yaml
+
+# Suppress tokenizer parallelism warning
+os.environ["TOKENIZERS_PARALLELISM"] = "false"
+
+import torch
+from datasets import load_dataset
+from peft import LoraConfig, TaskType, get_peft_model
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    EarlyStoppingCallback,
+)
+from trl import SFTConfig, SFTTrainer
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Configuration
+# =============================================================================
+
+def load_config(config_path: Path) -> dict:
+    """Load configuration from YAML file."""
+    if config_path.exists():
+        with open(config_path) as f:
+            return yaml.safe_load(f)
+    return {}
+
+
+def get_default_config() -> dict:
+    """Return default configuration."""
+    return {
+        "base_model": "Qwen/Qwen2.5-3B-Instruct",
+        "lora": {
+            "rank": 16,
+            "alpha": 32,
+            "dropout": 0.05,
+            "target_modules": [
+                "q_proj", "k_proj", "v_proj", "o_proj",
+                "gate_proj", "up_proj", "down_proj"
+            ],
+        },
+        "training": {
+            "epochs": 3,
+            "batch_size": 8,
+            "gradient_accumulation": 4,
+            "learning_rate": 2e-4,
+            "weight_decay": 0.01,
+            "warmup_ratio": 0.1,
+            "lr_scheduler": "cosine",
+            "max_seq_length": 2048,
+            "seed": 42,
+        },
+        "optimization": {
+            "use_4bit": True,
+            "gradient_checkpointing": False,
+            "bf16": True,
+        },
+        "checkpointing": {
+            "save_steps": 200,
+            "save_total_limit": 2,
+            "early_stopping_patience": 2,
+        },
+    }
+
+
+# =============================================================================
+# Model Loading
+# =============================================================================
+
+def load_tokenizer(model_name: str):
+    """Load and configure tokenizer."""
+    logger.info(f"Loading tokenizer: {model_name}")
+    tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
+    
+    # Ensure pad token is set
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    
+    return tokenizer
+
+
+def load_model(model_name: str, use_4bit: bool = True):
+    """Load base model with optional quantization.
+    
+    Args:
+        model_name: HuggingFace model identifier
+        use_4bit: Whether to use 4-bit quantization (QLoRA)
+    
+    Returns:
+        Loaded model ready for LoRA
+    """
+    logger.info(f"Loading model: {model_name}")
+    
+    model_kwargs = {
+        "trust_remote_code": True,
+        "torch_dtype": torch.bfloat16,
+        "device_map": "auto",
+    }
+    
+    # Enable Flash Attention 2 if available
+    try:
+        import flash_attn  # noqa: F401
+        model_kwargs["attn_implementation"] = "flash_attention_2"
+        logger.info("Using Flash Attention 2")
+    except ImportError:
+        logger.info("Flash Attention 2 not available")
+    
+    # 4-bit quantization for lower memory usage
+    if use_4bit:
+        logger.info("Using 4-bit quantization (QLoRA)")
+        model_kwargs["quantization_config"] = BitsAndBytesConfig(
+            load_in_4bit=True,
+            bnb_4bit_quant_type="nf4",
+            bnb_4bit_compute_dtype=torch.bfloat16,
+            bnb_4bit_use_double_quant=True,
+        )
+    
+    model = AutoModelForCausalLM.from_pretrained(model_name, **model_kwargs)
+    return model
+
+
+def apply_lora(model, lora_config: dict):
+    """Apply LoRA adapters to the model.
+    
+    LoRA (Low-Rank Adaptation) adds small trainable matrices to specific
+    layers, enabling efficient fine-tuning with ~1% of parameters.
+    
+    Args:
+        model: Base model
+        lora_config: LoRA configuration dict
+    
+    Returns:
+        Model with LoRA adapters
+    """
+    logger.info(f"Applying LoRA (rank={lora_config['rank']}, alpha={lora_config['alpha']})")
+    
+    config = LoraConfig(
+        r=lora_config["rank"],
+        lora_alpha=lora_config["alpha"],
+        target_modules=lora_config["target_modules"],
+        lora_dropout=lora_config["dropout"],
+        bias="none",
+        task_type=TaskType.CAUSAL_LM,
+    )
+    
+    model = get_peft_model(model, config)
+    model.print_trainable_parameters()
+    
+    return model
+
+
+# =============================================================================
+# Data Loading
+# =============================================================================
+
+def load_training_data(train_path: Path, val_path: Path):
+    """Load training and validation datasets."""
+    logger.info(f"Loading training data from {train_path}")
+    
+    data_files = {"train": str(train_path)}
+    if val_path and val_path.exists():
+        data_files["validation"] = str(val_path)
+        logger.info(f"Loading validation data from {val_path}")
+    
+    dataset = load_dataset("json", data_files=data_files)
+    
+    logger.info(f"Loaded {len(dataset['train'])} training samples")
+    if "validation" in dataset:
+        logger.info(f"Loaded {len(dataset['validation'])} validation samples")
+    
+    return dataset
+
+
+# =============================================================================
+# Training
+# =============================================================================
+
+def train(
+    model,
+    tokenizer,
+    dataset,
+    output_dir: Path,
+    training_config: dict,
+    optimization_config: dict,
+    checkpointing_config: dict,
+):
+    """Run the training loop.
+    
+    Uses HuggingFace TRL's SFTTrainer for supervised fine-tuning.
+    """
+    logger.info("Setting up training")
+    
+    # Determine eval strategy
+    has_validation = "validation" in dataset
+    eval_strategy = "epoch" if has_validation else "no"
+    
+    # Training arguments
+    training_args = SFTConfig(
+        output_dir=str(output_dir),
+        
+        # Training hyperparameters
+        num_train_epochs=training_config["epochs"],
+        per_device_train_batch_size=training_config["batch_size"],
+        per_device_eval_batch_size=training_config["batch_size"],
+        gradient_accumulation_steps=training_config["gradient_accumulation"],
+        learning_rate=training_config["learning_rate"],
+        weight_decay=training_config["weight_decay"],
+        warmup_ratio=training_config["warmup_ratio"],
+        lr_scheduler_type=training_config["lr_scheduler"],
+        max_seq_length=training_config["max_seq_length"],
+        seed=training_config["seed"],
+        
+        # Precision
+        bf16=optimization_config["bf16"],
+        
+        # Memory optimization
+        gradient_checkpointing=optimization_config["gradient_checkpointing"],
+        
+        # Checkpointing
+        save_strategy="steps",
+        save_steps=checkpointing_config["save_steps"],
+        save_total_limit=checkpointing_config["save_total_limit"],
+        
+        # Evaluation
+        eval_strategy=eval_strategy,
+        
+        # Logging
+        logging_steps=10,
+        report_to="none",  # Disable wandb by default
+        
+        # Performance
+        dataloader_num_workers=4,
+        dataloader_pin_memory=True,
+        optim="adamw_torch_fused",  # Faster optimizer
+    )
+    
+    # Callbacks
+    callbacks = []
+    if has_validation and checkpointing_config.get("early_stopping_patience", 0) > 0:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=checkpointing_config["early_stopping_patience"]
+            )
+        )
+        training_args.load_best_model_at_end = True
+        training_args.metric_for_best_model = "eval_loss"
+        training_args.greater_is_better = False
+        logger.info(f"Early stopping enabled (patience={checkpointing_config['early_stopping_patience']})")
+    
+    # Create trainer
+    trainer = SFTTrainer(
+        model=model,
+        args=training_args,
+        train_dataset=dataset["train"],
+        eval_dataset=dataset.get("validation"),
+        processing_class=tokenizer,
+        callbacks=callbacks if callbacks else None,
+    )
+    
+    # Train
+    logger.info("Starting training...")
+    logger.info(f"  Epochs: {training_config['epochs']}")
+    logger.info(f"  Batch size: {training_config['batch_size']}")
+    logger.info(f"  Gradient accumulation: {training_config['gradient_accumulation']}")
+    logger.info(f"  Effective batch size: {training_config['batch_size'] * training_config['gradient_accumulation']}")
+    logger.info(f"  Learning rate: {training_config['learning_rate']}")
+    
+    trainer.train()
+    
+    # Save final model
+    logger.info(f"Saving model to {output_dir}")
+    trainer.save_model()
+    tokenizer.save_pretrained(output_dir)
+    
+    # Save LoRA adapter separately
+    adapter_path = output_dir / "adapter"
+    model.save_pretrained(adapter_path)
+    logger.info(f"Saved LoRA adapter to {adapter_path}")
+    
+    return trainer
+
+
+# =============================================================================
+# Main
+# =============================================================================
+
+def main():
+    parser = argparse.ArgumentParser(description="Train Experience Model with LoRA")
+    
+    # Data
+    parser.add_argument("--train-data", type=Path, required=True, help="Training data JSONL")
+    parser.add_argument("--val-data", type=Path, default=None, help="Validation data JSONL")
+    parser.add_argument("--output", type=Path, default=Path("models/experience_model"), help="Output directory")
+    
+    # Model
+    parser.add_argument("--base-model", type=str, default=None, help="Base model to fine-tune")
+    parser.add_argument("--config", type=Path, default=Path("config/default.yaml"), help="Config file")
+    
+    # LoRA
+    parser.add_argument("--lora-rank", type=int, default=None, help="LoRA rank")
+    parser.add_argument("--lora-alpha", type=int, default=None, help="LoRA alpha")
+    
+    # Training
+    parser.add_argument("--epochs", type=int, default=None, help="Number of epochs")
+    parser.add_argument("--batch-size", type=int, default=None, help="Batch size")
+    parser.add_argument("--gradient-accumulation", type=int, default=None, help="Gradient accumulation steps")
+    parser.add_argument("--learning-rate", type=float, default=None, help="Learning rate")
+    parser.add_argument("--max-seq-length", type=int, default=None, help="Max sequence length")
+    
+    # Optimization
+    parser.add_argument("--use-4bit", action="store_true", default=None, help="Use 4-bit quantization")
+    parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit quantization")
+    parser.add_argument("--gradient-checkpointing", action="store_true", help="Enable gradient checkpointing")
+    
+    # Other
+    parser.add_argument("--seed", type=int, default=None, help="Random seed")
+    
+    args = parser.parse_args()
+    
+    # Load config
+    config = get_default_config()
+    if args.config.exists():
+        file_config = load_config(args.config)
+        # Deep merge
+        for key in file_config:
+            if isinstance(file_config[key], dict) and key in config:
+                config[key].update(file_config[key])
+            else:
+                config[key] = file_config[key]
+    
+    # Override with CLI args
+    if args.base_model:
+        config["base_model"] = args.base_model
+    if args.lora_rank:
+        config["lora"]["rank"] = args.lora_rank
+    if args.lora_alpha:
+        config["lora"]["alpha"] = args.lora_alpha
+    if args.epochs:
+        config["training"]["epochs"] = args.epochs
+    if args.batch_size:
+        config["training"]["batch_size"] = args.batch_size
+    if args.gradient_accumulation:
+        config["training"]["gradient_accumulation"] = args.gradient_accumulation
+    if args.learning_rate:
+        config["training"]["learning_rate"] = args.learning_rate
+    if args.max_seq_length:
+        config["training"]["max_seq_length"] = args.max_seq_length
+    if args.seed:
+        config["training"]["seed"] = args.seed
+    if args.use_4bit:
+        config["optimization"]["use_4bit"] = True
+    if args.no_4bit:
+        config["optimization"]["use_4bit"] = False
+    if args.gradient_checkpointing:
+        config["optimization"]["gradient_checkpointing"] = True
+    
+    # Validate inputs
+    if not args.train_data.exists():
+        logger.error(f"Training data not found: {args.train_data}")
+        logger.info("Run prepare_data.py first to create training data.")
+        return 1
+    
+    # Enable TF32 for faster matmuls on Ampere+ GPUs
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
+    
+    # Load components
+    tokenizer = load_tokenizer(config["base_model"])
+    model = load_model(config["base_model"], use_4bit=config["optimization"]["use_4bit"])
+    model = apply_lora(model, config["lora"])
+    dataset = load_training_data(args.train_data, args.val_data)
+    
+    # Train
+    args.output.mkdir(parents=True, exist_ok=True)
+    trainer = train(
+        model=model,
+        tokenizer=tokenizer,
+        dataset=dataset,
+        output_dir=args.output,
+        training_config=config["training"],
+        optimization_config=config["optimization"],
+        checkpointing_config=config["checkpointing"],
+    )
+    
+    logger.info("Training complete!")
+    return 0
+
+
+if __name__ == "__main__":
+    exit(main())
