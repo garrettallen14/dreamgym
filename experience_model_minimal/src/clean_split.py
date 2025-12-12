@@ -29,6 +29,9 @@ from typing import Dict, List, Set, Tuple
 try:
     from src.analyze_split import extract_entities, extract_instruction, load_samples, Sample
 except ImportError:
+    import sys
+    from pathlib import Path
+    sys.path.insert(0, str(Path(__file__).parent))
     from analyze_split import extract_entities, extract_instruction, load_samples, Sample
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")

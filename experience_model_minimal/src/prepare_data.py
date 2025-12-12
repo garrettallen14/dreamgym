@@ -15,7 +15,7 @@ from typing import List, Tuple
 
 from tqdm import tqdm
 
-from src.types import Trajectory, TrainingSample, load_trajectories
+from src.data_types import Trajectory, TrainingSample, load_trajectories
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
