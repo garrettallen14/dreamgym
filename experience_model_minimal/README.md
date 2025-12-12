@@ -236,14 +236,10 @@ This repo includes rigorous tools for detecting train/val data leakage and overf
 ### Analyze Split Quality
 
 ```bash
-# Basic analysis
-python src/analyze_split.py --train data/train.jsonl --val data/val.jsonl
-
-# With semantic similarity (requires sentence-transformers)
-python src/analyze_split.py --train data/train.jsonl --val data/val.jsonl --semantic
-
-# Save detailed report
-python src/analyze_split.py --train data/train.jsonl --val data/val.jsonl --output report.json
+uv run python src/analyze_split.py \
+    --train data/train.jsonl \
+    --val data/val.jsonl \
+    --output data/leakage_report.json
 ```
 
 ### Metrics Computed

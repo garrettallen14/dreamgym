@@ -17,8 +17,10 @@ Key concepts:
 """
 
 import argparse
+import json
 import logging
 import os
+import random
 from pathlib import Path
 
 import yaml
@@ -27,6 +29,11 @@ import yaml
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 import torch
+
+# Enable TF32 for faster matmuls on Ampere+ GPUs (A40, A100, etc.)
+torch.backends.cuda.matmul.allow_tf32 = True
+torch.backends.cudnn.allow_tf32 = True
+
 from datasets import load_dataset
 from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
@@ -34,11 +41,143 @@ from transformers import (
     AutoTokenizer,
     BitsAndBytesConfig,
     EarlyStoppingCallback,
+    TrainerCallback,
 )
 from trl import SFTConfig, SFTTrainer
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Sample Generation Callback (Critical for Monitoring)
+# =============================================================================
+
+class SampleGenerationCallback(TrainerCallback):
+    """Generate samples at regular intervals to monitor training progress.
+    
+    This callback is CRITICAL for understanding how training is progressing.
+    It generates predictions on fixed validation samples and saves them,
+    allowing you to see qualitative improvements over time.
+    """
+    
+    def __init__(self, tokenizer, eval_dataset, output_dir: Path, 
+                 sample_every: int = 100, num_samples: int = 3):
+        self.tokenizer = tokenizer
+        self.eval_dataset = eval_dataset
+        self.output_dir = Path(output_dir)
+        self.sample_every = sample_every
+        self.num_samples = num_samples
+        self.samples_file = self.output_dir / "training_samples.jsonl"
+        self.sample_indices = None
+        
+    def _get_sample_indices(self):
+        """Get fixed sample indices for consistent comparison across steps."""
+        if self.sample_indices is None:
+            dataset_size = len(self.eval_dataset) if self.eval_dataset else 0
+            if dataset_size > 0:
+                random.seed(42)  # Deterministic for reproducibility
+                self.sample_indices = random.sample(
+                    range(dataset_size), 
+                    min(self.num_samples, dataset_size)
+                )
+            else:
+                self.sample_indices = []
+        return self.sample_indices
+    
+    def _extract_from_messages(self, messages: list, role: str) -> str:
+        """Extract content from messages by role."""
+        for msg in messages:
+            if msg.get("role") == role:
+                return msg.get("content", "")
+        return ""
+    
+    def _generate_samples(self, model, step: int):
+        """Generate samples and save to file."""
+        if not self.eval_dataset or not self._get_sample_indices():
+            return
+        
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+        samples = []
+        
+        model.eval()
+        for idx in self._get_sample_indices():
+            example = self.eval_dataset[idx]
+            messages = example.get("messages", [])
+            
+            prompt = self._extract_from_messages(messages, "user")
+            ground_truth = self._extract_from_messages(messages, "assistant")
+            
+            if not prompt:
+                continue
+            
+            # Format for generation
+            chat_messages = [{"role": "user", "content": prompt}]
+            input_text = self.tokenizer.apply_chat_template(
+                chat_messages, tokenize=False, add_generation_prompt=True
+            )
+            
+            inputs = self.tokenizer(
+                input_text, return_tensors="pt", 
+                truncation=True, max_length=1024
+            )
+            inputs = {k: v.to(model.device) for k, v in inputs.items()}
+            
+            try:
+                with torch.inference_mode():
+                    with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+                        outputs = model.generate(
+                            **inputs,
+                            max_new_tokens=256,
+                            do_sample=False,
+                            pad_token_id=self.tokenizer.pad_token_id,
+                            use_cache=True,
+                        )
+                generated = self.tokenizer.decode(
+                    outputs[0][inputs["input_ids"].shape[1]:], 
+                    skip_special_tokens=True
+                )
+            except Exception as e:
+                generated = f"[Generation error: {e}]"
+            
+            sample = {
+                "step": step,
+                "sample_idx": idx,
+                "prompt": prompt[:500] + "..." if len(prompt) > 500 else prompt,
+                "ground_truth": ground_truth,
+                "generated": generated,
+            }
+            samples.append(sample)
+            
+            # Log to console
+            logger.info(f"\n{'='*60}")
+            logger.info(f"SAMPLE @ Step {step} (idx={idx})")
+            logger.info(f"{'='*60}")
+            logger.info(f"GROUND TRUTH: {ground_truth[:200]}...")
+            logger.info(f"GENERATED: {generated[:200]}...")
+        
+        # Append to JSONL file
+        with open(self.samples_file, "a") as f:
+            for sample in samples:
+                f.write(json.dumps(sample) + "\n")
+        
+        model.train()
+        logger.info(f"Saved {len(samples)} samples to {self.samples_file}")
+    
+    def on_train_begin(self, args, state, control, model=None, **kwargs):
+        """Generate samples before any training."""
+        logger.info("Generating initial samples (step 0)...")
+        self._generate_samples(model, step=0)
+    
+    def on_step_end(self, args, state, control, model=None, **kwargs):
+        """Generate samples at regular intervals."""
+        if state.global_step > 0 and state.global_step % self.sample_every == 0:
+            self._generate_samples(model, step=state.global_step)
+    
+    def on_train_end(self, args, state, control, model=None, **kwargs):
+        """Generate final samples."""
+        logger.info(f"Generating final samples (step {state.global_step})...")
+        self._generate_samples(model, step=state.global_step)
 
 
 # =============================================================================
@@ -210,16 +349,29 @@ def train(
     training_config: dict,
     optimization_config: dict,
     checkpointing_config: dict,
+    callbacks: list = None,
+    max_steps: int = -1,
 ):
     """Run the training loop.
     
     Uses HuggingFace TRL's SFTTrainer for supervised fine-tuning.
+    
+    Args:
+        model: Model with LoRA adapters
+        tokenizer: Tokenizer
+        dataset: Dataset with 'train' and optionally 'validation' splits
+        output_dir: Where to save checkpoints and final model
+        training_config: Training hyperparameters
+        optimization_config: Memory/precision settings
+        checkpointing_config: Save/early stopping settings
+        callbacks: Optional list of TrainerCallbacks
+        max_steps: Max training steps (-1 for full epochs)
     """
     logger.info("Setting up training")
     
     # Determine eval strategy
     has_validation = "validation" in dataset
-    eval_strategy = "epoch" if has_validation else "no"
+    eval_strategy = "epoch" if has_validation and max_steps < 0 else "steps" if has_validation else "no"
     
     # Training arguments
     training_args = SFTConfig(
@@ -227,6 +379,7 @@ def train(
         
         # Training hyperparameters
         num_train_epochs=training_config["epochs"],
+        max_steps=max_steps,
         per_device_train_batch_size=training_config["batch_size"],
         per_device_eval_batch_size=training_config["batch_size"],
         gradient_accumulation_steps=training_config["gradient_accumulation"],
@@ -250,29 +403,27 @@ def train(
         
         # Evaluation
         eval_strategy=eval_strategy,
+        eval_steps=500 if eval_strategy == "steps" else None,
         
         # Logging
         logging_steps=10,
-        report_to="none",  # Disable wandb by default
+        report_to="none",
         
         # Performance
         dataloader_num_workers=4,
         dataloader_pin_memory=True,
-        optim="adamw_torch_fused",  # Faster optimizer
+        optim="adamw_torch_fused",  # Faster optimizer (~10%)
+        remove_unused_columns=True,
     )
     
-    # Callbacks
-    callbacks = []
-    if has_validation and checkpointing_config.get("early_stopping_patience", 0) > 0:
-        callbacks.append(
-            EarlyStoppingCallback(
-                early_stopping_patience=checkpointing_config["early_stopping_patience"]
-            )
-        )
+    # Handle early stopping with load_best_model
+    if callbacks is None:
+        callbacks = []
+    
+    if has_validation and any(isinstance(cb, EarlyStoppingCallback) for cb in callbacks):
         training_args.load_best_model_at_end = True
         training_args.metric_for_best_model = "eval_loss"
         training_args.greater_is_better = False
-        logger.info(f"Early stopping enabled (patience={checkpointing_config['early_stopping_patience']})")
     
     # Create trainer
     trainer = SFTTrainer(
@@ -338,6 +489,12 @@ def main():
     parser.add_argument("--use-4bit", action="store_true", default=None, help="Use 4-bit quantization")
     parser.add_argument("--no-4bit", action="store_true", help="Disable 4-bit quantization")
     parser.add_argument("--gradient-checkpointing", action="store_true", help="Enable gradient checkpointing")
+    parser.add_argument("--compile", action="store_true", help="Use torch.compile for ~20%% speedup (not with 4-bit)")
+    parser.add_argument("--max-steps", type=int, default=-1, help="Max training steps (-1 for full epochs)")
+    
+    # Monitoring
+    parser.add_argument("--sample-every", type=int, default=0, help="Generate samples every N steps (0=disabled)")
+    parser.add_argument("--num-samples", type=int, default=3, help="Number of samples to generate at each checkpoint")
     
     # Other
     parser.add_argument("--seed", type=int, default=None, help="Random seed")
@@ -387,15 +544,48 @@ def main():
         logger.info("Run prepare_data.py first to create training data.")
         return 1
     
-    # Enable TF32 for faster matmuls on Ampere+ GPUs
-    torch.backends.cuda.matmul.allow_tf32 = True
-    torch.backends.cudnn.allow_tf32 = True
+    # Disable wandb
+    os.environ["WANDB_DISABLED"] = "true"
     
     # Load components
     tokenizer = load_tokenizer(config["base_model"])
     model = load_model(config["base_model"], use_4bit=config["optimization"]["use_4bit"])
     model = apply_lora(model, config["lora"])
+    
+    # Optional torch.compile for speedup
+    if args.compile:
+        if config["optimization"]["use_4bit"]:
+            logger.warning("torch.compile not compatible with 4-bit quantization - skipping")
+        else:
+            logger.info("Compiling model with torch.compile (first few steps will be slower)")
+            model = torch.compile(model)
+    
     dataset = load_training_data(args.train_data, args.val_data)
+    
+    # Build callbacks
+    callbacks = []
+    
+    # Early stopping
+    if "validation" in dataset and config["checkpointing"].get("early_stopping_patience", 0) > 0:
+        callbacks.append(
+            EarlyStoppingCallback(
+                early_stopping_patience=config["checkpointing"]["early_stopping_patience"]
+            )
+        )
+        logger.info(f"Early stopping enabled (patience={config['checkpointing']['early_stopping_patience']})")
+    
+    # Sample generation for monitoring
+    if args.sample_every > 0 and "validation" in dataset:
+        callbacks.append(
+            SampleGenerationCallback(
+                tokenizer=tokenizer,
+                eval_dataset=dataset["validation"],
+                output_dir=args.output,
+                sample_every=args.sample_every,
+                num_samples=args.num_samples,
+            )
+        )
+        logger.info(f"Sample generation enabled every {args.sample_every} steps")
     
     # Train
     args.output.mkdir(parents=True, exist_ok=True)
@@ -407,6 +597,8 @@ def main():
         training_config=config["training"],
         optimization_config=config["optimization"],
         checkpointing_config=config["checkpointing"],
+        callbacks=callbacks,
+        max_steps=args.max_steps,
     )
     
     logger.info("Training complete!")

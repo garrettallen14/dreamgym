@@ -131,18 +131,25 @@ def generate_prediction(model, tokenizer, prompt: str, max_new_tokens: int = 512
     
     Returns:
         Generated completion text
+    
+    Note:
+        Uses torch.inference_mode() (faster than no_grad) and autocast for
+        mixed precision inference.
     """
     messages = [{"role": "user", "content": prompt}]
     text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     inputs = tokenizer(text, return_tensors="pt").to(model.device)
     
-    with torch.no_grad():
-        outputs = model.generate(
-            **inputs,
-            max_new_tokens=max_new_tokens,
-            do_sample=False,
-            pad_token_id=tokenizer.pad_token_id,
-        )
+    # Use inference_mode (faster than no_grad) + autocast for efficiency
+    with torch.inference_mode():
+        with torch.cuda.amp.autocast(dtype=torch.bfloat16):
+            outputs = model.generate(
+                **inputs,
+                max_new_tokens=max_new_tokens,
+                do_sample=False,
+                pad_token_id=tokenizer.pad_token_id,
+                use_cache=True,  # Faster autoregressive generation
+            )
     
     generated = tokenizer.decode(
         outputs[0][inputs["input_ids"].shape[1]:],
