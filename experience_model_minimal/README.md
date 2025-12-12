@@ -14,26 +14,119 @@ Output: (next_state, reward, done)
 
 Once trained, it can generate synthetic trajectories for training agents without expensive real environment interactions.
 
-## Quick Start
+## Prerequisites
+
+### Install uv (Fast Python Package Manager)
 
 ```bash
-# Install dependencies
-pip install -e .
+# Linux/macOS
+curl -LsSf https://astral.sh/uv/install.sh | sh
 
-# Prepare training data (converts trajectories to chat format)
-python src/prepare_data.py --input data/trajectories.jsonl --output-dir data/
+# Or with pip
+pip install uv
 
-# Train the experience model
-python src/train.py \
-    --train-data data/train.jsonl \
-    --val-data data/val.jsonl \
+# Verify installation
+uv --version
+```
+
+### Setup Project
+
+```bash
+cd experience_model_minimal
+
+# Create virtual environment and install dependencies
+uv venv
+source .venv/bin/activate  # Linux/macOS
+# .venv\Scripts\activate   # Windows
+
+uv pip install -e .
+```
+
+---
+
+## Complete Workflow
+
+The recommended workflow ensures data quality before training:
+
+```
+Prepare Data → Analyze Split → Clean Leakage → Verify Clean → Train Model
+```
+
+### Step 1: Prepare Training Data
+
+Convert raw trajectories to chat format for LLM fine-tuning:
+
+```bash
+uv run python src/prepare_data.py \
+    --input data/trajectories.jsonl \
+    --output-dir data/ \
+    --val-split 0.1
+```
+
+### Step 2: Analyze Data Quality
+
+Detect leakage and overfitting risks in the train/val split:
+
+```bash
+uv run python src/analyze_split.py \
+    --train data/train.jsonl \
+    --val data/val.jsonl \
+    --output data/leakage_report.json
+```
+
+### Step 3: Clean Data (If Needed)
+
+If risk score is HIGH or CRITICAL, clean the split:
+
+```bash
+# Option A: Re-split by instruction (recommended - prevents task memorization)
+uv run python src/clean_split.py \
+    --train data/train.jsonl \
+    --val data/val.jsonl \
+    --resplit-by instruction
+
+# Option B: Re-split by entity (prevents product memorization)
+uv run python src/clean_split.py \
+    --train data/train.jsonl \
+    --val data/val.jsonl \
+    --resplit-by entity
+
+# Option C: Just remove duplicates
+uv run python src/clean_split.py \
+    --train data/train.jsonl \
+    --val data/val.jsonl
+```
+
+### Step 4: Verify Cleaned Data
+
+Re-run analysis to confirm improvement:
+
+```bash
+uv run python src/analyze_split.py \
+    --train data/train_clean.jsonl \
+    --val data/val_clean.jsonl
+```
+
+**Target**: Risk score < 15 (LOW or MINIMAL)
+
+### Step 5: Train the Experience Model
+
+```bash
+uv run python src/train.py \
+    --train-data data/train_clean.jsonl \
+    --val-data data/val_clean.jsonl \
     --output models/experience_model \
-    --epochs 3
+    --epochs 3 \
+    --use-4bit
+```
 
-# Validate the trained model
-python src/validate.py \
+### Step 6: Validate the Trained Model
+
+```bash
+uv run python src/validate.py \
     --model models/experience_model \
-    --data data/val.jsonl
+    --data data/val_clean.jsonl \
+    --num-samples 50
 ```
 
 ## Data Format
