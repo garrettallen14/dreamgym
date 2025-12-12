@@ -207,18 +207,18 @@ def get_default_config() -> dict:
         },
         "training": {
             "epochs": 3,
-            "batch_size": 8,
-            "gradient_accumulation": 4,
+            "batch_size": 2,  # Reduced for memory
+            "gradient_accumulation": 8,  # Increased to maintain effective batch size
             "learning_rate": 2e-4,
             "weight_decay": 0.01,
             "warmup_ratio": 0.1,
             "lr_scheduler": "cosine",
-            "max_seq_length": 2048,
+            "max_seq_length": 1024,
             "seed": 42,
         },
         "optimization": {
             "use_4bit": True,
-            "gradient_checkpointing": False,
+            "gradient_checkpointing": True,  # Critical for memory
             "bf16": True,
         },
         "checkpointing": {
@@ -387,7 +387,6 @@ def train(
         weight_decay=training_config["weight_decay"],
         warmup_ratio=training_config["warmup_ratio"],
         lr_scheduler_type=training_config["lr_scheduler"],
-        max_seq_length=training_config["max_seq_length"],
         seed=training_config["seed"],
         
         # Precision
